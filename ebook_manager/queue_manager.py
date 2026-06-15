@@ -213,8 +213,6 @@ class ETAStats:
             return 0.0
         remaining_tasks = pending_count + converting_count
         if remaining_tasks == 0:
-            self._smoothed_eta = 0.0
-            self._initialized = False
             return 0.0
         if MAX_CONCURRENT <= 0:
             raw_eta = remaining_tasks * avg
@@ -246,6 +244,10 @@ class ETAStats:
         hours = mins // 60
         mins = mins % 60
         return f"约 {hours}时{mins}分{secs}秒"
+
+    def reset(self):
+        self._smoothed_eta = 0.0
+        self._initialized = False
 
 
 class QueueManager(QObject):
@@ -410,7 +412,8 @@ class QueueManager(QObject):
         self.tasks_changed.emit()
 
     def apply_preset_to_all(self, preset_name: str, output_dir: Optional[str] = None,
-                            output_format: Optional[str] = None) -> int:
+                            output_format: Optional[str] = None,
+                            sync_output_dir: bool = False) -> int:
         preset = self._preset_manager.get(preset_name)
         if not preset:
             return 0
@@ -420,8 +423,8 @@ class QueueManager(QObject):
                 if t.status not in (TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.CANCELLED):
                     continue
                 self._preset_manager.apply_preset_to_task(t, preset_name)
-                if output_dir:
-                    t.output_dir = output_dir
+                if sync_output_dir:
+                    t.output_dir = output_dir if output_dir else None
                 if output_format:
                     t.output_format = output_format.lower()
                 count += 1
@@ -563,6 +566,9 @@ class QueueManager(QObject):
             overall_pct = int((avg_progress / total)) if total > 0 else 0
         else:
             overall_pct = 0
+
+        if total == 0 and pending == 0 and converting == 0:
+            self._eta_stats.reset()
 
         eta_seconds = self._eta_stats.estimate_remaining(pending, converting)
         eta_str = self._eta_stats.format_eta(eta_seconds)

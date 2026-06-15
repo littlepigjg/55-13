@@ -175,6 +175,50 @@ class TaskTableManager:
         self._table.blockSignals(False)
         self._table.setUpdatesEnabled(True)
 
+    def reorder_rows(self, source_row: int, target_row: int, tasks: list):
+        self._table.setUpdatesEnabled(False)
+        self._table.blockSignals(True)
+
+        total = len(tasks)
+        source_row = max(0, min(source_row, total - 1))
+        target_row = max(0, min(target_row, total))
+        if source_row == target_row or target_row == source_row + 1:
+            self._table.blockSignals(False)
+            self._table.setUpdatesEnabled(True)
+            return
+
+        source_widget = None
+        source_items = []
+        for col in range(self._table.columnCount()):
+            item = self._table.takeItem(source_row, col)
+            source_items.append(item)
+            if col == 4:
+                source_widget = self._table.cellWidget(source_row, 4)
+                self._table.removeCellWidget(source_row, 4)
+
+        if target_row > source_row:
+            target_row -= 1
+
+        self._table.insertRow(target_row)
+        for col in range(self._table.columnCount()):
+            if source_items[col]:
+                self._table.setItem(target_row, col, source_items[col])
+        if source_widget:
+            self._table.setCellWidget(target_row, 4, source_widget)
+
+        self._table.removeRow(source_row)
+
+        self._task_id_to_row.clear()
+        self._row_to_task_id.clear()
+        self._row_task_ids.clear()
+        for row, task in enumerate(tasks):
+            self._task_id_to_row[task.task_id] = row
+            self._row_to_task_id[row] = task.task_id
+            self._row_task_ids[row] = task.task_id
+
+        self._table.blockSignals(False)
+        self._table.setUpdatesEnabled(True)
+
     def update_task_row(self, task_id: str, task: ConvertQueueTask):
         row = self._task_id_to_row.get(task_id)
         if row is None or row < 0:

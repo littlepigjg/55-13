@@ -178,9 +178,11 @@ class ConvertQueueDialog(QDialog):
 
     def _on_sync_preset(self):
         preset_name = self.settings.get_preset_name()
-        output_dir = self.settings.get_output_dir() or None
+        output_dir = self.settings.get_output_dir()
         output_format = self.settings.get_output_format()
-        count = self._qm.apply_preset_to_all(preset_name, output_dir, output_format)
+        count = self._qm.apply_preset_to_all(
+            preset_name, output_dir, output_format, sync_output_dir=True
+        )
         if count > 0:
             self._append_log(f"🔄 已将预设「{preset_name}」同步到 {count} 个未完成任务")
             self._table_mgr.full_refresh(self._qm.get_tasks())
@@ -296,7 +298,7 @@ class ConvertQueueDialog(QDialog):
         if not task_id:
             return
         self._qm.move_task(task_id, target_row)
-        self._table_mgr.full_refresh(self._qm.get_tasks())
+        self._table_mgr.reorder_rows(source_row, target_row, self._qm.get_tasks())
 
     def _show_context_menu(self, pos):
         row = self._drag_table.rowAt(pos.y())
