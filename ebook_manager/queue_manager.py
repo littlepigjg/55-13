@@ -187,28 +187,52 @@ class ConvertRunnable(QRunnable):
 
 @dataclass
 class ETAStats:
-    total_duration: float = 0.0
-    completed_count: int = 0
+    _durations: deque = field(default_factory=lambda: deque(maxlen=30))
+    _smoothed_eta: float = 0.0
+    _last_raw_eta: float = 0.0
+    _ema_alpha: float = 0.25
+    _clamp_up_ratio: float = 1.4
+    _clamp_down_ratio: float = 0.6
+    _initialized: bool = False
 
     def add_completion(self, duration: float):
         if duration > 0:
-            self.total_duration += duration
-            self.completed_count += 1
+            self._durations.append(duration)
 
     @property
     def average_duration(self) -> float:
-        if self.completed_count == 0:
+        if not self._durations:
             return 0.0
-        return self.total_duration / self.completed_count
+        weights = list(range(1, len(self._durations) + 1))
+        total = sum(w * d for w, d in zip(weights, self._durations))
+        return total / sum(weights)
 
     def estimate_remaining(self, pending_count: int, converting_count: int = 0) -> float:
         avg = self.average_duration
         if avg == 0:
             return 0.0
+        remaining_tasks = pending_count + converting_count
+        if remaining_tasks == 0:
+            self._smoothed_eta = 0.0
+            self._initialized = False
+            return 0.0
         if MAX_CONCURRENT <= 0:
-            return (pending_count + converting_count) * avg
-        parallel_batches = (pending_count + MAX_CONCURRENT - 1) // MAX_CONCURRENT
-        return (parallel_batches * avg) + (converting_count * avg * 0.5)
+            raw_eta = remaining_tasks * avg
+        else:
+            converting_eta = converting_count * avg * 0.5
+            parallel_batches = (pending_count + MAX_CONCURRENT - 1) // MAX_CONCURRENT
+            raw_eta = parallel_batches * avg + converting_eta
+        self._last_raw_eta = raw_eta
+        if not self._initialized:
+            self._smoothed_eta = raw_eta
+            self._initialized = True
+        else:
+            ema_eta = self._ema_alpha * raw_eta + (1 - self._ema_alpha) * self._smoothed_eta
+            max_allowed = self._smoothed_eta * self._clamp_up_ratio
+            min_allowed = self._smoothed_eta * self._clamp_down_ratio
+            clamped = max(min_allowed, min(max_allowed, ema_eta))
+            self._smoothed_eta = clamped
+        return self._smoothed_eta
 
     def format_eta(self, seconds: float) -> str:
         if seconds <= 0:
@@ -384,6 +408,27 @@ class QueueManager(QObject):
             target_index = max(0, min(target_index, len(self._tasks)))
             self._tasks.insert(target_index, task)
         self.tasks_changed.emit()
+
+    def apply_preset_to_all(self, preset_name: str, output_dir: Optional[str] = None,
+                            output_format: Optional[str] = None) -> int:
+        preset = self._preset_manager.get(preset_name)
+        if not preset:
+            return 0
+        count = 0
+        with QMutexLocker(self._tasks_mutex):
+            for t in self._tasks:
+                if t.status not in (TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.CANCELLED):
+                    continue
+                self._preset_manager.apply_preset_to_task(t, preset_name)
+                if output_dir:
+                    t.output_dir = output_dir
+                if output_format:
+                    t.output_format = output_format.lower()
+                count += 1
+        if count > 0:
+            self.tasks_changed.emit()
+            self._emit_overall_progress()
+        return count
 
     def start(self):
         self._save_timer.start()
