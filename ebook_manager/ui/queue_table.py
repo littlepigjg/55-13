@@ -4,66 +4,14 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QTableWidget, QTableWidgetItem, QProgressBar, QAbstractItemView,
+    QTableWidget, QTableWidgetItem, QAbstractItemView,
     QHeaderView, QMenu, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QMimeData
 from PyQt6.QtGui import QAction, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QBrush, QColor
 
 from ..queue_models import ConvertQueueTask, TaskStatus
-
-
-PROGRESS_STYLE_DEFAULT = """
-    QProgressBar {
-        border: 1px solid #ddd;
-        border-radius: 3px;
-        text-align: center;
-        height: 18px;
-        margin: 2px;
-        background: white;
-    }
-    QProgressBar::chunk {
-        background: #4a9eff;
-        border-radius: 2px;
-    }
-"""
-
-PROGRESS_STYLE_COMPLETED = """
-    QProgressBar {
-        border: 1px solid #22c55e;
-        border-radius: 3px;
-        text-align: center;
-        height: 18px;
-        margin: 2px;
-        background: white;
-        color: #22c55e;
-    }
-    QProgressBar::chunk {
-        background: #22c55e;
-        border-radius: 2px;
-    }
-"""
-
-PROGRESS_STYLE_FAILED = """
-    QProgressBar {
-        border: 1px solid #ef4444;
-        border-radius: 3px;
-        text-align: center;
-        height: 18px;
-        margin: 2px;
-        background: white;
-        color: #ef4444;
-    }
-    QProgressBar::chunk {
-        background: #ef4444;
-        border-radius: 2px;
-    }
-"""
-
-_STATUS_STYLES = {
-    TaskStatus.COMPLETED: PROGRESS_STYLE_COMPLETED,
-    TaskStatus.FAILED: PROGRESS_STYLE_FAILED,
-}
+from .progress_delegate import ProgressDelegate, PROGRESS_ROLE, STATUS_ROLE
 
 
 class DragDropTableWidget(QTableWidget):
@@ -79,6 +27,8 @@ class DragDropTableWidget(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._drag_row = -1
 
     def startDrag(self, actions):
@@ -129,11 +79,19 @@ class DragDropTableWidget(QTableWidget):
 
 
 class TaskTableManager:
+    COL_STATUS = 0
+    COL_TITLE = 1
+    COL_AUTHOR = 2
+    COL_FMT = 3
+    COL_PROGRESS = 4
+    COL_DURATION = 5
+    COL_ERROR = 6
+
     def __init__(self, table: DragDropTableWidget):
         self._table = table
         self._task_id_to_row: dict = {}
         self._row_to_task_id: dict = {}
-        self._row_task_ids: dict = {}
+        self._progress_delegate = ProgressDelegate()
         self._setup_table()
 
     def _setup_table(self):
@@ -147,6 +105,8 @@ class TaskTableManager:
             self._table.setColumnWidth(i, w)
         header.setStretchLastSection(True)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.setItemDelegateForColumn(self.COL_PROGRESS, self._progress_delegate)
+        self._table.verticalHeader().setDefaultSectionSize(28)
 
     @property
     def table(self) -> DragDropTableWidget:
@@ -164,16 +124,16 @@ class TaskTableManager:
 
         self._task_id_to_row.clear()
         self._row_to_task_id.clear()
-        self._row_task_ids.clear()
         self._table.setRowCount(len(tasks))
 
         for row, task in enumerate(tasks):
             self._task_id_to_row[task.task_id] = row
             self._row_to_task_id[row] = task.task_id
-            self._populate_row(row, task, force=True)
+            self._populate_row(row, task)
 
         self._table.blockSignals(False)
         self._table.setUpdatesEnabled(True)
+        self._table.viewport().update()
 
     def reorder_rows(self, source_row: int, target_row: int, tasks: list):
         self._table.setUpdatesEnabled(False)
@@ -181,147 +141,123 @@ class TaskTableManager:
 
         total = len(tasks)
         source_row = max(0, min(source_row, total - 1))
-        target_row = max(0, min(target_row, total))
-        if source_row == target_row or target_row == source_row + 1:
+        target_row = max(0, min(target_row, total - 1))
+
+        if source_row == target_row:
             self._table.blockSignals(False)
             self._table.setUpdatesEnabled(True)
             return
 
-        source_widget = None
-        source_items = []
-        for col in range(self._table.columnCount()):
-            item = self._table.takeItem(source_row, col)
-            source_items.append(item)
-            if col == 4:
-                source_widget = self._table.cellWidget(source_row, 4)
-                self._table.removeCellWidget(source_row, 4)
-
-        if target_row > source_row:
-            target_row -= 1
-
-        self._table.insertRow(target_row)
-        for col in range(self._table.columnCount()):
-            if source_items[col]:
-                self._table.setItem(target_row, col, source_items[col])
-        if source_widget:
-            self._table.setCellWidget(target_row, 4, source_widget)
-
-        self._table.removeRow(source_row)
+        step = 1 if target_row > source_row else -1
+        current = source_row
+        while current != target_row:
+            next_row = current + step
+            self._swap_rows(current, next_row)
+            current = next_row
 
         self._task_id_to_row.clear()
         self._row_to_task_id.clear()
-        self._row_task_ids.clear()
         for row, task in enumerate(tasks):
             self._task_id_to_row[task.task_id] = row
             self._row_to_task_id[row] = task.task_id
-            self._row_task_ids[row] = task.task_id
 
         self._table.blockSignals(False)
         self._table.setUpdatesEnabled(True)
+        self._table.viewport().update()
+
+    def _swap_rows(self, row_a: int, row_b: int):
+        for col in range(self._table.columnCount()):
+            item_a = self._table.takeItem(row_a, col)
+            item_b = self._table.takeItem(row_b, col)
+            if item_a:
+                self._table.setItem(row_b, col, item_a)
+            if item_b:
+                self._table.setItem(row_a, col, item_b)
 
     def update_task_row(self, task_id: str, task: ConvertQueueTask):
         row = self._task_id_to_row.get(task_id)
         if row is None or row < 0:
             return False
-        self._populate_row(row, task, force=False)
+        self._populate_row(row, task)
         return True
 
     def update_progress_only(self, task_id: str, progress: int, task: ConvertQueueTask):
         row = self._task_id_to_row.get(task_id)
         if row is None or row < 0:
             return
-        progress_widget = self._table.cellWidget(row, 4)
-        if isinstance(progress_widget, QProgressBar):
-            progress_widget.setValue(progress)
-            progress_widget.setFormat(f"{progress}%")
+        item = self._table.item(row, self.COL_PROGRESS)
+        if item is None:
+            item = QTableWidgetItem()
+            self._table.setItem(row, self.COL_PROGRESS, item)
+        item.setData(PROGRESS_ROLE, progress)
+        item.setData(STATUS_ROLE, task.status.value)
         self._update_status_cell(row, task)
+        self._table.update(self._table.model().index(row, self.COL_PROGRESS))
 
-    def _populate_row(self, row: int, task: ConvertQueueTask, force: bool = False):
-        existing_tid = self._row_task_ids.get(row)
-        same_task = (existing_tid == task.task_id)
-        self._row_task_ids[row] = task.task_id
-
+    def _populate_row(self, row: int, task: ConvertQueueTask):
         self._update_status_cell(row, task)
         self._update_text_cells(row, task)
-        self._update_progress_widget(row, task, same_task and not force)
+        self._update_progress_cell(row, task)
         self._update_duration_cell(row, task)
         self._update_error_cell(row, task)
 
     def _update_status_cell(self, row: int, task: ConvertQueueTask):
-        existing = self._table.item(row, 0)
         new_text = f"{task.status.icon} {task.status.display_name}"
-        if existing and existing.text() == new_text:
-            return
-        status_item = QTableWidgetItem(new_text)
-        color = QColor(task.status.color)
-        status_item.setForeground(QBrush(color))
-        f = status_item.font()
-        f.setBold(True)
-        status_item.setFont(f)
-        status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_item.setData(Qt.ItemDataRole.UserRole, task.task_id)
-        self._table.setItem(row, 0, status_item)
+        item = self._table.item(row, self.COL_STATUS)
+        if item is None:
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            f = item.font()
+            f.setBold(True)
+            item.setFont(f)
+            item.setData(Qt.ItemDataRole.UserRole, task.task_id)
+            self._table.setItem(row, self.COL_STATUS, item)
+        if item.text() != new_text:
+            item.setText(new_text)
+            color = QColor(task.status.color)
+            item.setForeground(QBrush(color))
 
     def _update_text_cells(self, row: int, task: ConvertQueueTask):
-        title_item = self._table.item(row, 1)
         new_title = task.display_name
-        if not title_item or title_item.text() != new_title:
+        title_item = self._table.item(row, self.COL_TITLE)
+        if title_item is None or title_item.text() != new_title:
             item = QTableWidgetItem(new_title)
             item.setData(Qt.ItemDataRole.UserRole, task.task_id)
             item.setToolTip(task.input_path)
-            self._table.setItem(row, 1, item)
+            self._table.setItem(row, self.COL_TITLE, item)
 
-        author_item = self._table.item(row, 2)
         new_author = task.book_author or "-"
-        if not author_item or author_item.text() != new_author:
-            self._table.setItem(row, 2, QTableWidgetItem(new_author))
+        author_item = self._table.item(row, self.COL_AUTHOR)
+        if author_item is None or author_item.text() != new_author:
+            self._table.setItem(row, self.COL_AUTHOR, QTableWidgetItem(new_author))
 
         fmt_text = f"{task.source_format.upper()} → {task.output_format.upper()}"
-        fmt_item = self._table.item(row, 3)
-        if not fmt_item or fmt_item.text() != fmt_text:
+        fmt_item = self._table.item(row, self.COL_FMT)
+        if fmt_item is None or fmt_item.text() != fmt_text:
             item = QTableWidgetItem(fmt_text)
             item.setForeground(QBrush(QColor("#4a9eff")))
-            self._table.setItem(row, 3, item)
+            self._table.setItem(row, self.COL_FMT, item)
 
-    def _update_progress_widget(self, row: int, task: ConvertQueueTask, reuse: bool):
+    def _update_progress_cell(self, row: int, task: ConvertQueueTask):
         progress_val = task.progress if task.progress > 0 else (
             100 if task.status == TaskStatus.COMPLETED else 0
         )
-        if task.status == TaskStatus.CONVERTING:
-            progress_format = f"{task.progress}%"
-        elif task.status == TaskStatus.COMPLETED:
-            progress_format = "100%"
-        else:
-            progress_format = "等待"
-
-        target_style = _STATUS_STYLES.get(task.status, PROGRESS_STYLE_DEFAULT)
-
-        if reuse:
-            existing = self._table.cellWidget(row, 4)
-            if isinstance(existing, QProgressBar):
-                existing.setValue(progress_val)
-                existing.setFormat(progress_format)
-                existing.setStyleSheet(target_style)
-                return
-
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, 100)
-        progress_bar.setValue(progress_val)
-        progress_bar.setTextVisible(True)
-        progress_bar.setFormat(progress_format)
-        progress_bar.setStyleSheet(target_style)
-        self._table.setCellWidget(row, 4, progress_bar)
+        item = self._table.item(row, self.COL_PROGRESS)
+        if item is None:
+            item = QTableWidgetItem()
+            self._table.setItem(row, self.COL_PROGRESS, item)
+        item.setData(PROGRESS_ROLE, progress_val)
+        item.setData(STATUS_ROLE, task.status.value)
 
     def _update_duration_cell(self, row: int, task: ConvertQueueTask):
         duration_text = task.formatted_duration if task.duration_seconds > 0 else (
             "-" if task.status == TaskStatus.PENDING else "进行中"
         )
-        existing = self._table.item(row, 5)
-        if existing and existing.text() == duration_text:
-            return
-        duration_item = QTableWidgetItem(duration_text)
-        duration_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, 5, duration_item)
+        item = self._table.item(row, self.COL_DURATION)
+        if item is None or item.text() != duration_text:
+            duration_item = QTableWidgetItem(duration_text)
+            duration_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row, self.COL_DURATION, duration_item)
 
     def _update_error_cell(self, row: int, task: ConvertQueueTask):
         error_text = ""
@@ -331,13 +267,12 @@ class TaskTableManager:
                 error_text += "..."
         elif task.status == TaskStatus.CANCELLED:
             error_text = "用户取消"
-        existing = self._table.item(row, 6)
-        if existing and existing.text() == error_text:
-            return
-        error_item = QTableWidgetItem(error_text)
-        error_item.setForeground(QBrush(QColor("#ef4444")))
-        error_item.setToolTip(task.error_message)
-        self._table.setItem(row, 6, error_item)
+        item = self._table.item(row, self.COL_ERROR)
+        if item is None or item.text() != error_text:
+            error_item = QTableWidgetItem(error_text)
+            error_item.setForeground(QBrush(QColor("#ef4444")))
+            error_item.setToolTip(task.error_message)
+            self._table.setItem(row, self.COL_ERROR, error_item)
 
 
 def show_context_menu(table: DragDropTableWidget, pos, task: ConvertQueueTask,

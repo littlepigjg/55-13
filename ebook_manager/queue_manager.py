@@ -190,14 +190,40 @@ class ETAStats:
     _durations: deque = field(default_factory=lambda: deque(maxlen=30))
     _smoothed_eta: float = 0.0
     _last_raw_eta: float = 0.0
-    _ema_alpha: float = 0.25
-    _clamp_up_ratio: float = 1.4
-    _clamp_down_ratio: float = 0.6
+    _ema_alpha: float = 0.15
+    _clamp_up_ratio: float = 1.25
+    _clamp_down_ratio: float = 0.7
     _initialized: bool = False
+    _min_samples: int = 3
+    _last_display_eta: float = 0.0
+    _display_min_delta_ratio: float = 0.08
+    _display_min_delta_seconds: float = 15.0
+    _has_completed_tasks: bool = False
 
     def add_completion(self, duration: float):
-        if duration > 0:
-            self._durations.append(duration)
+        if duration <= 0:
+            return
+        if self._durations:
+            median = self._median()
+            if median > 0:
+                ratio = duration / median
+                if ratio > 3.0 or ratio < 0.2:
+                    return
+        self._durations.append(duration)
+        self._has_completed_tasks = True
+
+    def _median(self) -> float:
+        if not self._durations:
+            return 0.0
+        sorted_vals = sorted(self._durations)
+        n = len(sorted_vals)
+        if n % 2 == 0:
+            return (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+        return sorted_vals[n // 2]
+
+    @property
+    def has_enough_samples(self) -> bool:
+        return len(self._durations) >= self._min_samples
 
     @property
     def average_duration(self) -> float:
@@ -232,8 +258,23 @@ class ETAStats:
             self._smoothed_eta = clamped
         return self._smoothed_eta
 
-    def format_eta(self, seconds: float) -> str:
-        if seconds <= 0:
+    def get_display_eta(self, pending_count: int, converting_count: int = 0) -> float:
+        eta = self.estimate_remaining(pending_count, converting_count)
+        if eta <= 0:
+            self._last_display_eta = 0.0
+            return 0.0
+        delta = abs(eta - self._last_display_eta)
+        min_delta = max(self._last_display_eta * self._display_min_delta_ratio,
+                        self._display_min_delta_seconds)
+        if delta >= min_delta or self._last_display_eta == 0:
+            self._last_display_eta = eta
+            return eta
+        return self._last_display_eta
+
+    def format_eta(self, seconds: float, remaining_tasks: int = 0) -> str:
+        if remaining_tasks == 0 and self._has_completed_tasks:
+            return "✅ 全部完成"
+        if seconds <= 0 or not self.has_enough_samples:
             return "估算中..."
         if seconds < 60:
             return f"约 {seconds:.0f} 秒"
@@ -247,7 +288,9 @@ class ETAStats:
 
     def reset(self):
         self._smoothed_eta = 0.0
+        self._last_display_eta = 0.0
         self._initialized = False
+        self._has_completed_tasks = False
 
 
 class QueueManager(QObject):
@@ -570,8 +613,9 @@ class QueueManager(QObject):
         if total == 0 and pending == 0 and converting == 0:
             self._eta_stats.reset()
 
-        eta_seconds = self._eta_stats.estimate_remaining(pending, converting)
-        eta_str = self._eta_stats.format_eta(eta_seconds)
+        eta_seconds = self._eta_stats.get_display_eta(pending, converting)
+        remaining = pending + converting
+        eta_str = self._eta_stats.format_eta(eta_seconds, remaining)
 
         self.overall_progress_changed.emit(
             overall_pct, total, completed, converting,

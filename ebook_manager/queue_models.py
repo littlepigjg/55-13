@@ -275,6 +275,9 @@ class ConvertQueueTask:
         status_val = d.get("status", TaskStatus.PENDING.value)
         if status_val == TaskStatus.CONVERTING.value:
             task.status = TaskStatus.PENDING
+            task.progress = 0
+            task.started_at = None
+            task.duration_seconds = 0.0
         else:
             try:
                 task.status = TaskStatus(status_val)

@@ -132,6 +132,8 @@ class ConvertQueueDialog(QDialog):
         self._qm.tasks_changed.connect(self._refresh_stats)
         self._qm.overall_progress_changed.connect(self._on_overall_progress)
         self._qm.log_message.connect(self._append_log)
+        self.settings.sync_preset_requested.connect(self._on_sync_preset)
+        self.settings.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
 
     def _load_initial_tasks(self):
         if not self._books:
@@ -184,7 +186,11 @@ class ConvertQueueDialog(QDialog):
             preset_name, output_dir, output_format, sync_output_dir=True
         )
         if count > 0:
-            self._append_log(f"🔄 已将预设「{preset_name}」同步到 {count} 个未完成任务")
+            dir_info = f"，输出目录: {output_dir if output_dir else '默认'}"
+            self._append_log(
+                f"🔄 已将预设「{preset_name}」同步到 {count} 个未完成任务"
+                f"（格式: {output_format.upper()}{dir_info}）"
+            )
             self._table_mgr.full_refresh(self._qm.get_tasks())
         else:
             self._append_log("ℹ️ 没有需要同步的未完成任务")
