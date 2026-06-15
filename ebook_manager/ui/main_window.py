@@ -14,12 +14,13 @@ from ..metadata_parser import MetadataParser
 from ..metadata_editor import MetadataEditor
 from ..network_source import NetworkSourceManager
 from ..converter import FormatConverter
+from ..queue_manager import QueueManager
 
 from .scanner_panel import ScannerPanel
 from .book_table import BookTableWidget
 from .edit_panel import MetadataEditPanel
 from .search_dialog import OnlineSearchDialog
-from .convert_dialog import ConvertDialog
+from .convert_queue_dialog import ConvertQueueDialog
 from .workers import ScanWorker, ParseWorker
 
 
@@ -35,6 +36,9 @@ class MainWindow(QMainWindow):
         self._editor = MetadataEditor()
         self._source_manager = NetworkSourceManager()
         self._converter = FormatConverter()
+        self._queue_manager = QueueManager()
+        self._queue_manager.start()
+        self._queue_dialog = None
 
         self._init_ui()
         self._init_menu()
@@ -223,11 +227,16 @@ class MainWindow(QMainWindow):
     def _on_convert_requested(self, books: list):
         if not books:
             books = self.book_table.get_selected_books()
-        if not books:
-            QMessageBox.information(self, "提示", "请先选择要转换的书籍")
-            return
-        dialog = ConvertDialog(books, self._converter, self)
-        dialog.exec()
+        if self._queue_dialog is None or not self._queue_dialog.isVisible():
+            self._queue_dialog = ConvertQueueDialog(books, self._queue_manager, self)
+            self._queue_dialog.show()
+        else:
+            if books:
+                self._queue_dialog._add_files_to_queue(
+                    [b.file_path for b in books if isinstance(b, BookMeta)]
+                )
+            self._queue_dialog.raise_()
+            self._queue_dialog.activateWindow()
 
     def _import_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -277,5 +286,13 @@ class MainWindow(QMainWindow):
             "📚 电子书元数据管理器 v1.0\n\n"
             "支持 EPUB/MOBI/PDF 元数据编辑与格式转换\n"
             "元数据来源: 豆瓣读书、OpenLibrary\n"
-            "格式转换依赖: Calibre (ebook-convert)"
+            "格式转换依赖: Calibre (ebook-convert)\n"
+            "队列管理: QThreadPool 并发任务调度"
         )
+
+    def closeEvent(self, event):
+        try:
+            self._queue_manager.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
